@@ -137,11 +137,12 @@ export const Step1UploadMapping: React.FC<Step1Props> = ({
           <input
             ref={fileInputRef}
             type="file"
-            accept=".xlsx,.xls,.csv"
+            accept=".xlsx,.xls,.csv,.vcf"
             className="hidden"
             onChange={(e) => {
               const file = e.target.files?.[0];
               if (file) onFileSelected(file);
+              e.target.value = '';
             }}
           />
           <div className="w-14 h-14 rounded-2xl bg-indigo-500/15 border border-indigo-500/30 flex items-center justify-center mb-4 text-indigo-400">

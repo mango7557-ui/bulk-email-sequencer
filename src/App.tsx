@@ -28,6 +28,10 @@ import {
   loadClientOptOutList,
   saveClientOptOutList,
 } from './utils/clientQueueEngine';
+import {
+  convertGoogleContactsToRows,
+  parseGoogleContactsExportFile,
+} from './utils/googleContactsHelper';
 import { Step1UploadMapping } from './components/Step1UploadMapping';
 import { Step2TemplateCompliance } from './components/Step2TemplateCompliance';
 import { Step3QueueAndDashboard } from './components/Step3QueueAndDashboard';
@@ -88,9 +92,9 @@ export const App: React.FC = () => {
 
   const [compliance, setCompliance] = useState<ComplianceConfig>({
     isAd: true,
-    senderName: '(주)테크플로우 코리아',
-    senderEmail: 'newsletter@techflow.kr',
-    replyToEmail: 'support@techflow.kr',
+    senderName: '홍보야 (HONGBOYA)',
+    senderEmail: 'hongboyanet@gmail.com',
+    replyToEmail: 'hongboyanet@gmail.com',
     senderPhone: '02-1588-0000',
     senderAddress: '서울특별시 강남구 테헤란로 152 파이낸스센터 18층',
     unsubscribeBaseUrl: 'http://localhost:4000/api/unsubscribe',
@@ -109,9 +113,9 @@ export const App: React.FC = () => {
   const [providerConfig, setProviderConfig] = useState<ProviderConfig>({
     provider: 'dryrun',
     resendApiKey: '',
-    smtpHost: 'email-smtp.ap-northeast-2.amazonaws.com',
+    smtpHost: 'smtp.gmail.com',
     smtpPort: 587,
-    smtpUser: '',
+    smtpUser: 'hongboyanet@gmail.com',
     smtpPass: '',
     smtpSecure: false,
     simulateBounceRate: 8,
@@ -194,14 +198,50 @@ export const App: React.FC = () => {
     [validatedList]
   );
 
-  // 파일 업로드 처리
+  // 파일 업로드 처리 (일반 엑셀/CSV 및 Google 주소록 CSV/.vcf 자동 감지)
   const handleFileSelected = async (file: File) => {
     try {
+      const lowerName = file.name.toLowerCase();
+      if (lowerName.endsWith('.vcf')) {
+        const gcItems = await parseGoogleContactsExportFile(file);
+        const rows = convertGoogleContactsToRows(gcItems);
+        if (rows.length === 0) {
+          showToast('주소록 파일에 이메일이 포함된 연락처가 없습니다.');
+          return;
+        }
+        const hdrs = Object.keys(rows[0]);
+        setFileName(file.name);
+        setHeaders(hdrs);
+        setRawRows(rows);
+        setMapping(autoDetectColumnMapping(hdrs));
+        showToast(`${file.name} 주소록 로드 완료 (${rows.length}건)`);
+        return;
+      }
+
       const parsed = await parseExcelOrCsvFile(file);
       if (parsed.headers.length === 0) {
         showToast('파일에 유효한 데이터 행이 없습니다.');
         return;
       }
+
+      // Google Contacts 내보내기 CSV 포맷(E-mail 1 - Value 등) 자동 감지 시 정규화 변환
+      const isGoogleContactsCsv = parsed.headers.some((h) =>
+        /e-mail 1 - value|email 1 - value|group membership|phonetic first name/i.test(h)
+      );
+      if (isGoogleContactsCsv) {
+        const gcItems = await parseGoogleContactsExportFile(file);
+        const rows = convertGoogleContactsToRows(gcItems);
+        if (rows.length > 0) {
+          const hdrs = Object.keys(rows[0]);
+          setFileName(file.name);
+          setHeaders(hdrs);
+          setRawRows(rows);
+          setMapping(autoDetectColumnMapping(hdrs));
+          showToast(`Google 주소록 CSV (${file.name}) 한글 변환 및 로드 완료 (${rows.length}건)`);
+          return;
+        }
+      }
+
       setFileName(file.name);
       setHeaders(parsed.headers);
       setRawRows(parsed.rows);

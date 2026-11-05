@@ -293,6 +293,17 @@ export const GmailContactsModal: React.FC<GmailContactsModalProps> = ({
 
         {/* 모달 본문 */}
         <div className="p-6 overflow-y-auto flex-1 space-y-4">
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".csv,.vcf,.xlsx"
+            className="hidden"
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              if (f) handleContactsFileChange(f);
+              e.target.value = '';
+            }}
+          />
           {activeTab === 'list' && (
             <div className="space-y-4">
               {/* 라벨 필터 & 검색창 */}
@@ -314,7 +325,7 @@ export const GmailContactsModal: React.FC<GmailContactsModalProps> = ({
                   ))}
                 </div>
 
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 shrink-0">
                   <div className="relative">
                     <Search className="w-3.5 h-3.5 text-slate-500 absolute left-3 top-1/2 -translate-y-1/2" />
                     <input
@@ -327,14 +338,21 @@ export const GmailContactsModal: React.FC<GmailContactsModalProps> = ({
                   </div>
                   <button
                     type="button"
+                    onClick={() => fileInputRef.current?.click()}
+                    className="px-3 py-1.5 rounded-xl bg-indigo-600/20 hover:bg-indigo-600/30 text-xs text-indigo-300 border border-indigo-500/40 whitespace-nowrap shrink-0 transition"
+                  >
+                    CSV 파일 다시 선택
+                  </button>
+                  <button
+                    type="button"
                     onClick={() => {
                       setContacts(GMAIL_DEMO_CONTACTS);
                       setSelectedIds(new Set(GMAIL_DEMO_CONTACTS.map((c) => c.id)));
                       setStatusNotice('Gmail 샘플 주소록 8건을 다시 불러왔습니다.');
                     }}
-                    className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs text-slate-300 border border-slate-700 transition"
+                    className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs text-slate-300 border border-slate-700 whitespace-nowrap shrink-0 transition"
                   >
-                    샘플 주소록 복원
+                    샘플 복원
                   </button>
                 </div>
               </div>
@@ -489,16 +507,6 @@ export const GmailContactsModal: React.FC<GmailContactsModalProps> = ({
 
           {activeTab === 'csv' && (
             <div className="rounded-xl border-2 border-dashed border-slate-700 bg-slate-950/70 p-8 text-center space-y-4">
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept=".csv,.vcf,.xlsx"
-                className="hidden"
-                onChange={(e) => {
-                  const f = e.target.files?.[0];
-                  if (f) handleContactsFileChange(f);
-                }}
-              />
               <div className="w-12 h-12 rounded-2xl bg-blue-500/15 border border-blue-500/30 flex items-center justify-center mx-auto text-blue-400">
                 <FileUp className="w-6 h-6" />
               </div>

@@ -250,9 +250,85 @@ export function validateAndFilterRows(
   });
 }
 
+// UTF-8 바이트가 Latin-1(ISO-8859-1 / Windows-1252)로 잘못 해석된 문자열(Mojibake) 자동 복원
+const WIN1252_EXTRA_MAP: Record<number, number> = {
+  0x20ac: 0x80,
+  0x201a: 0x82,
+  0x0192: 0x83,
+  0x201e: 0x84,
+  0x2026: 0x85,
+  0x2020: 0x86,
+  0x2021: 0x87,
+  0x02c6: 0x88,
+  0x2030: 0x89,
+  0x0160: 0x8a,
+  0x2039: 0x8b,
+  0x0152: 0x8c,
+  0x017d: 0x8e,
+  0x2018: 0x91,
+  0x2019: 0x92,
+  0x201c: 0x93,
+  0x201d: 0x94,
+  0x2022: 0x95,
+  0x2013: 0x96,
+  0x2014: 0x97,
+  0x02dc: 0x98,
+  0x2122: 0x99,
+  0x0161: 0x9a,
+  0x203a: 0x9b,
+  0x0153: 0x9c,
+  0x017e: 0x9e,
+  0x0178: 0x9f,
+};
+
+export function repairMojibakeString(str: string): string {
+  if (!str) return '';
+  // 이미 정상 한글이 포함되어 있으면 그대로 반환
+  if (/[가-힣]/.test(str)) return str;
+  // 전형적인 UTF-8 한글 3바이트(0xEA~0xED ...)가 Latin-1로 깨진 패턴 감지
+  if (!/[\u00c0-\u00ff]/.test(str)) return str;
+
+  try {
+    const bytes = new Uint8Array(str.length);
+    for (let i = 0; i < str.length; i++) {
+      const code = str.charCodeAt(i);
+      if (code <= 0xff) {
+        bytes[i] = code;
+      } else if (WIN1252_EXTRA_MAP[code] !== undefined) {
+        bytes[i] = WIN1252_EXTRA_MAP[code];
+      } else {
+        return str;
+      }
+    }
+    const decoded = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    return decoded;
+  } catch {
+    return str;
+  }
+}
+
+export function decodeBufferToTextSmart(buffer: ArrayBuffer): string {
+  let text = '';
+  try {
+    const utf8Decoder = new TextDecoder('utf-8', { fatal: true });
+    text = utf8Decoder.decode(buffer).replace(/^\uFEFF/, '');
+  } catch {
+    try {
+      const eucKrDecoder = new TextDecoder('euc-kr');
+      text = eucKrDecoder.decode(buffer);
+    } catch {
+      text = new TextDecoder('utf-8').decode(buffer).replace(/^\uFEFF/, '');
+    }
+  }
+  return repairMojibakeString(text);
+}
+
 export async function parseExcelOrCsvFile(file: File): Promise<{ headers: string[]; rows: RawRow[] }> {
   const buffer = await file.arrayBuffer();
-  const workbook = XLSX.read(buffer, { type: 'array' });
+  const isCsv = file.name.toLowerCase().endsWith('.csv') || file.type.includes('csv');
+  const workbook = isCsv
+    ? XLSX.read(decodeBufferToTextSmart(buffer), { type: 'string', raw: false })
+    : XLSX.read(buffer, { type: 'array', codepage: 65001 });
   const firstSheetName = workbook.SheetNames[0];
   const worksheet = workbook.Sheets[firstSheetName];
   const jsonData = XLSX.utils.sheet_to_json<Record<string, unknown>>(worksheet, { defval: '' });
@@ -261,12 +337,15 @@ export async function parseExcelOrCsvFile(file: File): Promise<{ headers: string
     return { headers: [], rows: [] };
   }
 
-  const headers = Object.keys(jsonData[0]);
+  const rawHeaders = Object.keys(jsonData[0]);
+  const headers = rawHeaders.map((h) => repairMojibakeString(h));
   const rows: RawRow[] = jsonData.map((item) => {
     const converted: RawRow = {};
-    for (const key of headers) {
-      converted[key] = item[key] !== undefined && item[key] !== null ? String(item[key]) : '';
-    }
+    rawHeaders.forEach((rawKey, idx) => {
+      const cleanHeader = headers[idx];
+      const rawVal = item[rawKey] !== undefined && item[rawKey] !== null ? String(item[rawKey]) : '';
+      converted[cleanHeader] = repairMojibakeString(rawVal);
+    });
     return converted;
   });
 

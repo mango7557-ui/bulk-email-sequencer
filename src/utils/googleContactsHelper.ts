@@ -1,5 +1,6 @@
 import * as XLSX from 'xlsx';
 import { RawRow } from '../types';
+import { decodeBufferToTextSmart, repairMojibakeString } from './excelHelper';
 
 export interface GoogleContactItem {
   id: string;
@@ -225,13 +226,32 @@ export function launchGoogleOAuthPopup(clientId: string): Promise<string> {
   });
 }
 
+// Google 주소록 라벨(Group Membership / Labels)에서 * myContacts 등 시스템 태그 제거 및 정규화
+function cleanGoogleContactsLabel(rawLabel: string): string {
+  const repaired = repairMojibakeString(rawLabel || '').trim();
+  if (!repaired) return '기본 연락처';
+
+  const parts = repaired
+    .split(/\s*:::\s*|\s*;\s*/)
+    .map((p) => p.replace(/^\*\s*/, '').trim())
+    .filter(
+      (p) =>
+        Boolean(p) &&
+        !/^(mycontacts|starred|all|contacts|other contacts|imported.*)$/i.test(p)
+    );
+
+  if (parts.length === 0) return '기본 연락처';
+  return parts[0];
+}
+
 // Google Contacts 내보내기 CSV 또는 vCard(.vcf) 파일 파싱
 export async function parseGoogleContactsExportFile(file: File): Promise<GoogleContactItem[]> {
   const fileName = file.name.toLowerCase();
+  const buffer = await file.arrayBuffer();
 
   // 1) vCard (.vcf) 포맷 파싱
   if (fileName.endsWith('.vcf')) {
-    const text = await file.text();
+    const text = decodeBufferToTextSmart(buffer);
     const cards = text.split(/BEGIN:VCARD/i).slice(1);
     const results: GoogleContactItem[] = [];
 
@@ -242,16 +262,16 @@ export async function parseGoogleContactsExportFile(file: File): Promise<GoogleC
       const titleMatch = card.match(/^TITLE(?:;[^:]*)?:(.+)$/im);
       const telMatch = card.match(/^TEL(?:;[^:]*)?:(.+)$/im);
 
-      const email = emailMatch ? emailMatch[1].trim() : '';
-      if (!email) return;
+      const email = emailMatch ? repairMojibakeString(emailMatch[1].trim()) : '';
+      if (!email || !email.includes('@')) return;
 
       results.push({
         id: `vcf-${idx + 1}`,
         email,
-        name: fnMatch ? fnMatch[1].trim() : email.split('@')[0],
-        company: orgMatch ? orgMatch[1].split(';')[0].trim() : '',
-        title: titleMatch ? titleMatch[1].trim() : '담당자',
-        phone: telMatch ? telMatch[1].trim() : '',
+        name: fnMatch ? repairMojibakeString(fnMatch[1].trim()) : email.split('@')[0],
+        company: orgMatch ? repairMojibakeString(orgMatch[1].split(';')[0].trim()) : '',
+        title: titleMatch ? repairMojibakeString(titleMatch[1].trim()) : '담당자',
+        phone: telMatch ? repairMojibakeString(telMatch[1].trim()) : '',
         label: 'Google vCard (.vcf)',
         discountRate: '20%',
         manager: '박서연 프로',
@@ -261,70 +281,123 @@ export async function parseGoogleContactsExportFile(file: File): Promise<GoogleC
     return results;
   }
 
-  // 2) Google Contacts CSV / Outlook CSV 파싱
-  const buffer = await file.arrayBuffer();
-  const workbook = XLSX.read(buffer, { type: 'array' });
+  // 2) Google Contacts CSV / Outlook CSV 파싱 (UTF-8 / EUC-KR 자동 감지 및 Mojibake 복원)
+  const isCsv = fileName.endsWith('.csv') || file.type.includes('csv');
+  const workbook = isCsv
+    ? XLSX.read(decodeBufferToTextSmart(buffer), { type: 'string', raw: false })
+    : XLSX.read(buffer, { type: 'array', codepage: 65001 });
   const sheet = workbook.Sheets[workbook.SheetNames[0]];
   const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: '' });
 
   const results: GoogleContactItem[] = [];
-  rows.forEach((row, idx) => {
-    const findVal = (keys: string[]) => {
-      for (const k of Object.keys(row)) {
-        if (keys.some((cand) => k.toLowerCase().includes(cand.toLowerCase()))) {
-          const val = String(row[k] ?? '').trim();
-          if (val) return val;
-        }
+  rows.forEach((rawRow, idx) => {
+    const row: Record<string, string> = {};
+    for (const [k, v] of Object.entries(rawRow)) {
+      const cleanKey = repairMojibakeString(k).trim();
+      const cleanVal = repairMojibakeString(String(v ?? '')).trim();
+      row[cleanKey] = cleanVal;
+    }
+
+    const rowKeys = Object.keys(row);
+    const findExactOrIncludes = (exactCandidates: string[], includeCandidates: string[] = []) => {
+      for (const cand of exactCandidates) {
+        const hit = rowKeys.find((k) => k.toLowerCase() === cand.toLowerCase());
+        if (hit && row[hit]) return row[hit];
+      }
+      for (const cand of includeCandidates) {
+        const hit = rowKeys.find((k) => k.toLowerCase().includes(cand.toLowerCase()));
+        if (hit && row[hit]) return row[hit];
       }
       return '';
     };
 
-    const email = findVal([
-      'e-mail 1 - value',
-      'email 1 - value',
-      'e-mail address',
-      'email address',
-      'email',
-      '이메일',
-      '전자 메일 주소',
-    ]);
-    if (!email) return;
+    const rawEmail = findExactOrIncludes(
+      [
+        'e-mail 1 - value',
+        'email 1 - value',
+        'e-mail 2 - value',
+        'email 2 - value',
+        'e-mail address',
+        'email address',
+        'email',
+        '이메일',
+        '전자 메일 주소',
+      ],
+      ['e-mail', 'email', '이메일', '메일']
+    );
 
-    const fullName =
-      findVal(['name', '이름', '수신자명', '성명']) ||
-      `${findVal(['family name', 'last name', '성'])}${findVal(['given name', 'first name', '이름'])}`.trim() ||
-      email.split('@')[0];
+    const email = rawEmail.split(/\s*:::\s*|\s*,\s*|\s*;\s*/)[0]?.trim();
+    if (!email || !email.includes('@')) return;
 
-    const company = findVal([
-      'organization 1 - name',
-      'organization name',
-      'company',
-      '회사',
-      '회사명',
-      '소속',
-    ]);
-
-    const title = findVal([
-      'organization 1 - title',
-      'job title',
-      'title',
-      '직급',
-      '직함',
+    const explicitFullName = findExactOrIncludes([
+      'name',
+      'full name',
+      'display name',
+      '이름',
+      '수신자명',
+      '성명',
     ]);
 
-    const phone = findVal([
-      'phone 1 - value',
-      'mobile phone',
-      'primary phone',
-      'phone',
-      '전화번호',
-      '휴대전화',
-    ]);
+    const lastName = findExactOrIncludes(['last name', 'family name', '성']);
+    const middleName = findExactOrIncludes(['middle name', 'additional name', '중간 이름']);
+    const firstName = findExactOrIncludes(['first name', 'given name']);
 
-    const label =
-      findVal(['group membership', 'labels', 'categories', '라벨', '그룹'])
-        .replace(/\*\*\*|\s*:::\s*/g, ' ')
-        .trim() || 'Google CSV 주소록';
+    let fullName = explicitFullName;
+    if (!fullName) {
+      const combinedParts = [lastName, middleName, firstName].filter(Boolean);
+      const joined = combinedParts.join(' ');
+      fullName = /^[가-힣]+\s+[가-힣]+$/.test(joined) ? combinedParts.join('') : joined;
+    }
+    if (!fullName) {
+      fullName = findExactOrIncludes(['file as', 'nickname', '호칭']) || email.split('@')[0];
+    }
+
+    const company = findExactOrIncludes(
+      [
+        'organization name',
+        'organization 1 - name',
+        'company',
+        '회사',
+        '회사명',
+        '기업명',
+        '소속',
+      ],
+      ['organization', 'company', '회사', '소속']
+    );
+
+    const title = findExactOrIncludes(
+      [
+        'organization title',
+        'organization 1 - title',
+        'job title',
+        'title',
+        '직급',
+        '직함',
+        'organization department',
+      ],
+      ['title', '직급', '직함', '부서']
+    );
+
+    const rawPhone = findExactOrIncludes(
+      [
+        'phone 1 - value',
+        'phone 2 - value',
+        'mobile phone',
+        'primary phone',
+        'business phone',
+        'phone',
+        '전화번호',
+        '휴대전화',
+      ],
+      ['phone', '전화', '휴대폰', '연락처']
+    );
+    const phone = rawPhone.split(/\s*:::\s*/)[0]?.trim() || '';
+
+    const rawLabel = findExactOrIncludes(
+      ['labels', 'group membership', 'categories', '라벨', '그룹'],
+      ['label', 'group', '라벨', '그룹']
+    );
+    const label = cleanGoogleContactsLabel(rawLabel);
 
     results.push({
       id: `gcsv-${idx + 1}`,
