@@ -1,0 +1,23 @@
+[
+  {
+    "email": "optout-user@example.com",
+    "reason": "수신자가 이전 캠페인에서 원클릭 수신거부 요청",
+    "source": "ONE_CLICK_RFC8058",
+    "unsubscribedAt": "2026-10-21T09:15:00.000Z",
+    "noticeSentAt": "2026-10-21T09:15:02.000Z"
+  },
+  {
+    "email": "unsubscribed@company.co.kr",
+    "reason": "웹 수신거부 링크 클릭",
+    "source": "WEB_LINK",
+    "unsubscribedAt": "2026-10-28T14:22:10.000Z",
+    "noticeSentAt": "2026-10-28T14:22:12.000Z"
+  },
+  {
+    "email": "donotcontact@naver.com",
+    "reason": "고객센터 유선 수신거부 접수",
+    "source": "ADMIN_MANUAL",
+    "unsubscribedAt": "2026-11-01T11:05:40.000Z",
+    "noticeSentAt": "2026-11-01T11:06:00.000Z"
+  }
+]
