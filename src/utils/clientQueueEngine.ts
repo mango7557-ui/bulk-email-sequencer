@@ -8,9 +8,11 @@ import {
   RateLimitConfig,
   RecipientStatus,
   RecipientTask,
+  SentEmailRecord,
 } from '../types';
 
 const OPTOUT_STORAGE_KEY = 'mailflow_pro_optout_db_v1';
+const SENT_HISTORY_STORAGE_KEY = 'mailflow_pro_sent_history_v1';
 
 const INITIAL_OPTOUT_SEED: OptOutEntry[] = [
   {
@@ -57,6 +59,41 @@ export function saveClientOptOutList(list: OptOutEntry[]): void {
   }
 }
 
+export function loadClientSentHistory(): SentEmailRecord[] {
+  try {
+    const raw = localStorage.getItem(SENT_HISTORY_STORAGE_KEY);
+    if (!raw) return [];
+    return JSON.parse(raw);
+  } catch {
+    return [];
+  }
+}
+
+export function saveClientSentHistory(list: SentEmailRecord[]): void {
+  try {
+    localStorage.setItem(SENT_HISTORY_STORAGE_KEY, JSON.stringify(list.slice(0, 1500)));
+  } catch {
+    // ignore storage quota errors
+  }
+}
+
+export function appendClientSentRecord(record: SentEmailRecord): void {
+  const current = loadClientSentHistory();
+  const next = [record, ...current.filter((r) => r.id !== record.id)].slice(0, 1500);
+  saveClientSentHistory(next);
+}
+
+export function deleteClientSentRecords(ids: string[]): SentEmailRecord[] {
+  const idSet = new Set(ids);
+  const next = loadClientSentHistory().filter((r) => !idSet.has(r.id));
+  saveClientSentHistory(next);
+  return next;
+}
+
+export function clearClientSentHistory(): void {
+  saveClientSentHistory([]);
+}
+
 class ClientQueueEngine {
   private id = 'none';
   private title = '대기 중인 캠페인 없음';
@@ -64,6 +101,7 @@ class ClientQueueEngine {
   private startedAt?: string;
   private completedAt?: string;
   private subjectTemplate = '';
+  private bodyHtmlTemplate = '';
   private compliance: ComplianceConfig = {
     isAd: true,
     senderName: '(주)테크플로우 코리아',
@@ -227,6 +265,7 @@ class ClientQueueEngine {
   start(params: {
     title: string;
     subjectTemplate: string;
+    bodyHtmlTemplate?: string;
     compliance: ComplianceConfig;
     rateLimit: RateLimitConfig;
     providerConfig: ProviderConfig;
@@ -246,6 +285,7 @@ class ClientQueueEngine {
     this.startedAt = new Date().toISOString();
     this.completedAt = undefined;
     this.subjectTemplate = params.subjectTemplate;
+    this.bodyHtmlTemplate = params.bodyHtmlTemplate || '';
     this.compliance = { ...params.compliance };
     this.rateLimit = { ...params.rateLimit };
     this.providerConfig = { ...params.providerConfig };
@@ -383,6 +423,28 @@ class ClientQueueEngine {
     const delayMs = isLast ? 0 : this.computeDelayMs();
     task.delayAppliedMs = delayMs;
     this.nextSendDelayMs = delayMs;
+
+    appendClientSentRecord({
+      id: task.id,
+      campaignId: this.id,
+      campaignTitle: this.title,
+      email: task.email,
+      name: task.name,
+      company: task.company,
+      variables: task.variables,
+      subject: task.renderedSubject || '',
+      bodyHtml: this.interpolate(this.bodyHtmlTemplate, task),
+      status: status as 'SENT' | 'BOUNCED' | 'FAILED',
+      statusCode: code,
+      messageId: task.messageId,
+      errorMessage: error,
+      sentAt: task.sentAt,
+      senderEmail: this.compliance.senderEmail,
+      senderName: this.compliance.senderName,
+      provider: this.providerConfig.provider,
+      delayAppliedMs: delayMs,
+      headersIncluded: task.headersIncluded,
+    });
 
     if (ok) {
       this.addLog(

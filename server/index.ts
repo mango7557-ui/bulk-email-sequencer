@@ -79,6 +79,56 @@ function saveOptOutDb(entries: OptOutEntry[]) {
 
 let optOutList: OptOutEntry[] = loadOptOutDb();
 
+export interface SentEmailRecord {
+  id: string;
+  campaignId: string;
+  campaignTitle: string;
+  email: string;
+  name: string;
+  company: string;
+  variables: Record<string, string>;
+  subject: string;
+  bodyHtml: string;
+  status: 'SENT' | 'BOUNCED' | 'FAILED';
+  statusCode: string;
+  messageId?: string;
+  errorMessage?: string;
+  sentAt: string;
+  senderEmail: string;
+  senderName: string;
+  provider: 'dryrun' | 'resend' | 'smtp';
+  delayAppliedMs?: number;
+  headersIncluded?: Record<string, string>;
+}
+
+const SENT_HISTORY_DB_PATH = path.join(__dirname, 'sent-history-db.json');
+
+function loadSentHistoryDb(): SentEmailRecord[] {
+  try {
+    if (!fs.existsSync(SENT_HISTORY_DB_PATH)) {
+      fs.writeFileSync(SENT_HISTORY_DB_PATH, JSON.stringify([], null, 2), 'utf-8');
+      return [];
+    }
+    return JSON.parse(fs.readFileSync(SENT_HISTORY_DB_PATH, 'utf-8'));
+  } catch {
+    return [];
+  }
+}
+
+function saveSentHistoryDb(entries: SentEmailRecord[]) {
+  try {
+    fs.writeFileSync(
+      SENT_HISTORY_DB_PATH,
+      JSON.stringify(entries.slice(0, 1500), null, 2),
+      'utf-8'
+    );
+  } catch (err) {
+    console.error('Failed to save sent history DB:', err);
+  }
+}
+
+let sentHistoryList: SentEmailRecord[] = loadSentHistoryDb();
+
 // ==========================================
 // 2. 순차 발송 큐(Queue) 및 캠페인 상태 정의
 // ==========================================
@@ -602,6 +652,30 @@ async function processNextInQueue() {
   task.delayAppliedMs = delayMs;
   campaign.nextSendDelayMs = delayMs;
 
+  // 보낸 이메일 보관함에 영구 기록
+  sentHistoryList.unshift({
+    id: task.id,
+    campaignId: campaign.id,
+    campaignTitle: campaign.title,
+    email: task.email,
+    name: task.name,
+    company: task.company,
+    variables: task.variables,
+    subject,
+    bodyHtml: htmlBody,
+    status: result.status as 'SENT' | 'BOUNCED' | 'FAILED',
+    statusCode: result.code,
+    messageId: result.messageId,
+    errorMessage: result.error,
+    sentAt: task.sentAt,
+    senderEmail: campaign.compliance.senderEmail,
+    senderName: campaign.compliance.senderName,
+    provider: campaign.providerConfig.provider,
+    delayAppliedMs: delayMs,
+    headersIncluded: headers,
+  });
+  saveSentHistoryDb(sentHistoryList);
+
   if (result.ok) {
     addLog(
       'SUCCESS',
@@ -964,6 +1038,27 @@ app.post('/api/campaign/reset', (_req, res) => {
   campaign.currentBatchNumber = 1;
   campaign.batchRestRemainingSec = 0;
   res.json({ ok: true });
+});
+
+// ==========================================
+// 보낸 이메일 관리 (Sent Email Archive) API
+// ==========================================
+app.get('/api/sent-history', (_req, res) => {
+  res.json({ sentHistoryList });
+});
+
+app.post('/api/sent-history/delete', (req, res) => {
+  const { ids = [] } = (req.body || {}) as { ids?: string[] };
+  const idSet = new Set(ids);
+  sentHistoryList = sentHistoryList.filter((item) => !idSet.has(item.id));
+  saveSentHistoryDb(sentHistoryList);
+  res.json({ ok: true, sentHistoryList });
+});
+
+app.post('/api/sent-history/clear', (_req, res) => {
+  sentHistoryList = [];
+  saveSentHistoryDb(sentHistoryList);
+  res.json({ ok: true, sentHistoryList });
 });
 
 // ==========================================

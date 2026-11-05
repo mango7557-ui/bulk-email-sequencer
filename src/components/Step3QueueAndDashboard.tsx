@@ -41,6 +41,7 @@ interface Step3Props {
   onCancelCampaign: () => Promise<void>;
   onResetCampaign: () => Promise<void>;
   onSimulateOneClickUnsubscribe: (email: string) => Promise<void>;
+  onOpenSentManager: () => void;
   onBack: () => void;
 }
 
@@ -58,6 +59,7 @@ export const Step3QueueAndDashboard: React.FC<Step3Props> = ({
   onCancelCampaign,
   onResetCampaign,
   onSimulateOneClickUnsubscribe,
+  onOpenSentManager,
   onBack,
 }) => {
   const [statusTab, setStatusTab] = useState<'ALL' | RecipientStatus>('ALL');
@@ -513,16 +515,22 @@ export const Step3QueueAndDashboard: React.FC<Step3Props> = ({
               </button>
             )}
 
-            {(state === 'COMPLETED' || state === 'CANCELLED') && (
-              <button
-                type="button"
-                onClick={onResetCampaign}
-                className="inline-flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium border border-slate-700 transition"
-              >
-                <RotateCcw className="w-3.5 h-3.5" />
-                초기화
-              </button>
-            )}
+            <button
+              type="button"
+              onClick={onResetCampaign}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl bg-slate-800 hover:bg-rose-500/20 text-slate-300 hover:text-rose-300 text-xs font-semibold border border-slate-700 transition"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+              발송 큐 초기화
+            </button>
+
+            <button
+              type="button"
+              onClick={onOpenSentManager}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-indigo-300 text-xs font-semibold border border-indigo-500/30 transition"
+            >
+              보낸 이메일 관리함
+            </button>
 
             <button
               type="button"

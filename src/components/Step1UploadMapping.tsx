@@ -14,6 +14,7 @@ import {
   ArrowRight,
   Table,
   Users,
+  RotateCcw,
 } from 'lucide-react';
 import {
   ColumnMapping,
@@ -34,6 +35,7 @@ interface Step1Props {
   optOutList: OptOutEntry[];
   onFileSelected: (file: File) => void;
   onLoadSampleData: () => void;
+  onClearRecipients: () => void;
   onImportGmailContacts: (rows: RawRow[], mode: 'merge' | 'replace', sourceLabel: string) => void;
   onUpdateMapping: (next: ColumnMapping) => void;
   onAddOptOut: (email: string, reason: string) => Promise<void>;
@@ -50,6 +52,7 @@ export const Step1UploadMapping: React.FC<Step1Props> = ({
   optOutList,
   onFileSelected,
   onLoadSampleData,
+  onClearRecipients,
   onImportGmailContacts,
   onUpdateMapping,
   onAddOptOut,
@@ -195,14 +198,24 @@ export const Step1UploadMapping: React.FC<Step1Props> = ({
               <Users className="w-4 h-4" />
               Gmail 주소록 (Google Contacts) 연동
             </button>
-            <button
-              type="button"
-              onClick={onLoadSampleData}
-              className="w-full flex items-center justify-center gap-2 px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-indigo-300 border border-indigo-500/30 text-xs font-medium transition"
-            >
-              <Sparkles className="w-3.5 h-3.5" />
-              샘플 엑셀 데이터(15건) 즉시 로드
-            </button>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={onLoadSampleData}
+                className="flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-indigo-300 border border-indigo-500/30 text-xs font-medium transition"
+              >
+                <Sparkles className="w-3.5 h-3.5" />
+                샘플 15건 로드
+              </button>
+              <button
+                type="button"
+                onClick={onClearRecipients}
+                className="flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-slate-800 hover:bg-rose-500/20 text-slate-300 hover:text-rose-300 border border-slate-700 text-xs font-medium transition"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                수신자 목록 초기화
+              </button>
+            </div>
             <div className="grid grid-cols-2 gap-2">
               <button
                 type="button"
@@ -561,15 +574,25 @@ export const Step1UploadMapping: React.FC<Step1Props> = ({
                   문법 오류, 중복 이메일, 수신거부(Opt-Out) DB 일치 항목은 발송 큐에서 자동으로 제외됩니다.
                 </p>
               </div>
-              <button
-                type="button"
-                disabled={validCount === 0}
-                onClick={onProceedNext}
-                className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white text-sm font-semibold transition shadow-lg shadow-indigo-600/25"
-              >
-                <span>검증 통과 {validCount}건으로 템플릿 설정 진행</span>
-                <ArrowRight className="w-4 h-4" />
-              </button>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={onClearRecipients}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl bg-slate-800 hover:bg-rose-500/20 text-slate-300 hover:text-rose-300 border border-slate-700 text-xs font-semibold transition"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  목록 초기화 (비우기)
+                </button>
+                <button
+                  type="button"
+                  disabled={validCount === 0}
+                  onClick={onProceedNext}
+                  className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white text-sm font-semibold transition shadow-lg shadow-indigo-600/25"
+                >
+                  <span>검증 통과 {validCount}건으로 템플릿 설정 진행</span>
+                  <ArrowRight className="w-4 h-4" />
+                </button>
+              </div>
             </div>
 
             <div className="max-h-96 overflow-y-auto">

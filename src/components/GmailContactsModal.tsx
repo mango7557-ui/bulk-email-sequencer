@@ -346,8 +346,23 @@ export const GmailContactsModal: React.FC<GmailContactsModalProps> = ({
                   <button
                     type="button"
                     onClick={() => {
+                      setContacts([]);
+                      setSelectedIds(new Set());
+                      setLabelFilter('ALL');
+                      setSearchQuery('');
+                      setStatusNotice('주소록 목록이 초기화되었습니다. 새 CSV 파일을 선택하거나 샘플을 복원할 수 있습니다.');
+                    }}
+                    className="px-3 py-1.5 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 text-xs text-rose-300 border border-rose-500/30 whitespace-nowrap shrink-0 transition"
+                  >
+                    초기화
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
                       setContacts(GMAIL_DEMO_CONTACTS);
                       setSelectedIds(new Set(GMAIL_DEMO_CONTACTS.map((c) => c.id)));
+                      setLabelFilter('ALL');
+                      setSearchQuery('');
                       setStatusNotice('Gmail 샘플 주소록 8건을 다시 불러왔습니다.');
                     }}
                     className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs text-slate-300 border border-slate-700 whitespace-nowrap shrink-0 transition"

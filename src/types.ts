@@ -120,3 +120,26 @@ export interface CampaignStatusResponse {
   tasks: RecipientTask[];
   logs: CampaignEventLog[];
 }
+
+export interface SentEmailRecord {
+  id: string;
+  campaignId: string;
+  campaignTitle: string;
+  email: string;
+  name: string;
+  company: string;
+  variables: Record<string, string>;
+  subject: string;
+  bodyHtml: string;
+  status: 'SENT' | 'BOUNCED' | 'FAILED';
+  statusCode: string;
+  messageId?: string;
+  errorMessage?: string;
+  sentAt: string;
+  senderEmail: string;
+  senderName: string;
+  provider: 'dryrun' | 'resend' | 'smtp';
+  delayAppliedMs?: number;
+  headersIncluded?: Record<string, string>;
+}
+

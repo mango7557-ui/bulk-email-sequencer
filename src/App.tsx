@@ -7,6 +7,8 @@ import {
   CheckCircle2,
   Scale,
   Server,
+  RotateCcw,
+  MailCheck,
 } from 'lucide-react';
 import {
   CampaignStatusResponse,
@@ -16,6 +18,7 @@ import {
   ProviderConfig,
   RateLimitConfig,
   RawRow,
+  SentEmailRecord,
 } from './types';
 import {
   SAMPLE_EXCEL_ROWS,
@@ -24,8 +27,11 @@ import {
   validateAndFilterRows,
 } from './utils/excelHelper';
 import {
+  clearClientSentHistory,
   clientQueueEngine,
+  deleteClientSentRecords,
   loadClientOptOutList,
+  loadClientSentHistory,
   saveClientOptOutList,
 } from './utils/clientQueueEngine';
 import {
@@ -35,6 +41,7 @@ import {
 import { Step1UploadMapping } from './components/Step1UploadMapping';
 import { Step2TemplateCompliance } from './components/Step2TemplateCompliance';
 import { Step3QueueAndDashboard } from './components/Step3QueueAndDashboard';
+import { Step4SentEmailManager } from './components/Step4SentEmailManager';
 
 const DEFAULT_HTML_TEMPLATE = `<div style="padding: 8px 0;">
   <h2 style="color: #1e293b; font-size: 20px; margin-bottom: 12px;">
@@ -67,7 +74,7 @@ const DEFAULT_TEXT_TEMPLATE = `안녕하세요, {company} {name} ({직급})님!
 도입 상담이나 상세 견적이 필요하시면 언제든 회신해 주시기 바랍니다.`;
 
 export const App: React.FC = () => {
-  const [activeStep, setActiveStep] = useState<1 | 2 | 3>(1);
+  const [activeStep, setActiveStep] = useState<1 | 2 | 3 | 4>(1);
 
   // Step 1 상태: 엑셀 데이터 & 컬럼 매핑 & 수신거부 DB
   const sampleHeaders = Object.keys(SAMPLE_EXCEL_ROWS[0]);
@@ -78,6 +85,9 @@ export const App: React.FC = () => {
     autoDetectColumnMapping(sampleHeaders)
   );
   const [optOutList, setOptOutList] = useState<OptOutEntry[]>(() => loadClientOptOutList());
+  const [sentHistory, setSentHistory] = useState<SentEmailRecord[]>(() =>
+    loadClientSentHistory()
+  );
   const [useClientFallback, setUseClientFallback] = useState<boolean>(false);
 
   // Step 2 상태: 이메일 템플릿 & 법적 컴플라이언스
@@ -167,15 +177,34 @@ export const App: React.FC = () => {
     }
   };
 
+  // 보낸 이메일 이력 로드
+  const fetchSentHistory = async () => {
+    try {
+      const res = await fetch('/api/sent-history');
+      const contentType = res.headers.get('content-type') || '';
+      if (res.ok && contentType.includes('application/json')) {
+        const data = await res.json();
+        setSentHistory(data.sentHistoryList || []);
+        return;
+      }
+      throw new Error('Static hosting mode');
+    } catch {
+      setSentHistory(loadClientSentHistory());
+    }
+  };
+
   useEffect(() => {
     fetchOptOutList();
     fetchCampaignStatus();
+    fetchSentHistory();
     const unsub = clientQueueEngine.subscribe(() => {
       setCampaignStatus(clientQueueEngine.getStatus());
+      setSentHistory(loadClientSentHistory());
     });
     const timer = setInterval(() => {
       fetchCampaignStatus();
-    }, 800);
+      fetchSentHistory();
+    }, 1000);
     return () => {
       unsub();
       clearInterval(timer);
@@ -260,6 +289,84 @@ export const App: React.FC = () => {
     setRawRows(SAMPLE_EXCEL_ROWS);
     setMapping(autoDetectColumnMapping(hdrs));
     showToast('샘플 수신자 데이터 15건이 로드되었습니다.');
+  };
+
+  // 수신자 목록 초기화 (전체 비우기)
+  const handleClearRecipients = () => {
+    setFileName('');
+    setHeaders([]);
+    setRawRows([]);
+    setMapping({
+      emailColumn: '',
+      nameColumn: '',
+      companyColumn: '',
+      variableColumns: {},
+    });
+    showToast('수신자 목록이 초기화되었습니다. 새 엑셀/CSV 파일 또는 Gmail 주소록을 불러오세요.');
+  };
+
+  // 워크스페이스 전체 초기화
+  const handleResetAllWorkspace = async () => {
+    handleClearRecipients();
+    await handleResetCampaign();
+    setActiveStep(1);
+    showToast('수신자 목록 및 발송 큐가 모두 초기화되었습니다.');
+  };
+
+  // 보낸 이메일 선택 삭제
+  const handleDeleteSentRecords = async (ids: string[]) => {
+    if (!useClientFallback) {
+      try {
+        const res = await fetch('/api/sent-history/delete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ids }),
+        });
+        const contentType = res.headers.get('content-type') || '';
+        if (res.ok && contentType.includes('application/json')) {
+          const data = await res.json();
+          setSentHistory(data.sentHistoryList || []);
+          showToast(`선택한 보낸 이메일 ${ids.length}건이 삭제되었습니다.`);
+          return;
+        }
+      } catch {
+        // fallback below
+      }
+    }
+    const next = deleteClientSentRecords(ids);
+    setSentHistory(next);
+    showToast(`선택한 보낸 이메일 ${ids.length}건이 삭제되었습니다.`);
+  };
+
+  // 보낸 이메일 전체 초기화
+  const handleClearSentHistory = async () => {
+    if (!useClientFallback) {
+      try {
+        const res = await fetch('/api/sent-history/clear', { method: 'POST' });
+        if (res.ok) {
+          setSentHistory([]);
+          showToast('보낸 이메일 보관함이 전체 초기화되었습니다.');
+          return;
+        }
+      } catch {
+        // fallback below
+      }
+    }
+    clearClientSentHistory();
+    setSentHistory([]);
+    showToast('보낸 이메일 보관함이 전체 초기화되었습니다.');
+  };
+
+  // 보낸 이메일 관리에서 선택한 수신자 재발송 대기열로 로드
+  const handleResendToRecipients = (rows: RawRow[], label: string) => {
+    if (rows.length === 0) return;
+    const hdrs = Object.keys(rows[0]);
+    setFileName(label);
+    setHeaders(hdrs);
+    setRawRows(rows);
+    setMapping(autoDetectColumnMapping(hdrs));
+    setActiveStep(3);
+    showToast(`${label} 대상이 순차 발송 큐에 준비되었습니다.`);
   };
 
   // Gmail 주소록(Google Contacts) 연동 데이터 반영 (병합 또는 전체 교체)
@@ -591,12 +698,21 @@ export const App: React.FC = () => {
               <span>유효 발송 대상:</span>
               <strong className="text-indigo-300">{validRecipients.length}명</strong>
             </div>
+            <button
+              type="button"
+              onClick={handleResetAllWorkspace}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/30 text-rose-300 font-semibold transition"
+              title="수신자 목록 및 발송 큐 전체 초기화"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+              <span>전체 초기화</span>
+            </button>
           </div>
         </div>
 
-        {/* 스텝 네비게이션 탭 */}
+        {/* 스텝 네비게이션 탭 (4단계) */}
         <div className="max-w-7xl mx-auto px-4 sm:px-6 pb-3">
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
             <button
               type="button"
               onClick={() => setActiveStep(1)}
@@ -618,7 +734,7 @@ export const App: React.FC = () => {
               <div className="min-w-0">
                 <div className="text-xs font-semibold flex items-center gap-1.5">
                   <FileSpreadsheet className="w-3.5 h-3.5 text-indigo-400" />
-                  엑셀 업로드 & 컬럼 매핑
+                  엑셀 · Gmail 주소록 매핑
                 </div>
                 <div className="text-[11px] text-slate-400 truncate">
                   유효 {validRecipients.length}건 · 제외 {excludedRecipients.length}건
@@ -683,6 +799,35 @@ export const App: React.FC = () => {
                 </div>
               </div>
             </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveStep(4)}
+              className={`flex items-center gap-3 p-3 rounded-xl border text-left transition ${
+                activeStep === 4
+                  ? 'border-indigo-500 bg-indigo-500/15 text-white'
+                  : 'border-slate-800/80 bg-slate-900/50 text-slate-400 hover:text-white hover:border-slate-700'
+              }`}
+            >
+              <div
+                className={`w-7 h-7 rounded-lg flex items-center justify-center text-xs font-bold ${
+                  activeStep === 4
+                    ? 'bg-indigo-600 text-white'
+                    : 'bg-slate-800 text-slate-300'
+                }`}
+              >
+                4
+              </div>
+              <div className="min-w-0">
+                <div className="text-xs font-semibold flex items-center gap-1.5">
+                  <MailCheck className="w-3.5 h-3.5 text-cyan-400" />
+                  보낸 이메일 관리 (보관함)
+                </div>
+                <div className="text-[11px] text-slate-400 truncate">
+                  누적 발송 {sentHistory.length}건 · 원문 열람 · 재발송
+                </div>
+              </div>
+            </button>
           </div>
         </div>
       </header>
@@ -707,6 +852,7 @@ export const App: React.FC = () => {
             optOutList={optOutList}
             onFileSelected={handleFileSelected}
             onLoadSampleData={handleLoadSampleData}
+            onClearRecipients={handleClearRecipients}
             onImportGmailContacts={handleImportGmailContacts}
             onUpdateMapping={setMapping}
             onAddOptOut={handleAddOptOut}
@@ -749,7 +895,17 @@ export const App: React.FC = () => {
             onCancelCampaign={handleCancelCampaign}
             onResetCampaign={handleResetCampaign}
             onSimulateOneClickUnsubscribe={handleSimulateOneClickUnsubscribe}
+            onOpenSentManager={() => setActiveStep(4)}
             onBack={() => setActiveStep(2)}
+          />
+        )}
+
+        {activeStep === 4 && (
+          <Step4SentEmailManager
+            sentHistory={sentHistory}
+            onDeleteRecords={handleDeleteSentRecords}
+            onClearAllHistory={handleClearSentHistory}
+            onResendToRecipients={handleResendToRecipients}
           />
         )}
       </main>
