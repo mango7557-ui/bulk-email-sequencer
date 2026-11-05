@@ -3,7 +3,11 @@ import cors from 'cors';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 import nodemailer from 'nodemailer';
+
+const execFileAsync = promisify(execFile);
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -960,6 +964,137 @@ app.post('/api/campaign/reset', (_req, res) => {
   campaign.currentBatchNumber = 1;
   campaign.batchRestRemainingSec = 0;
   res.json({ ok: true });
+});
+
+// ==========================================
+// 7. Gmail 주소록 (Google Contacts) 연동 API
+// ==========================================
+interface GoogleContactNormalized {
+  이메일: string;
+  수신자명: string;
+  회사명: string;
+  직급: string;
+  전화번호: string;
+  라벨: string;
+}
+
+// 연결된 Google Contacts 커넥터(gsk) 또는 Google People API로 주소록 불러오기
+app.post('/api/google-contacts/fetch', async (req, res) => {
+  const { query = '', accessToken = '' } = (req.body || {}) as {
+    query?: string;
+    accessToken?: string;
+  };
+
+  // 1) 사용자가 Google OAuth Access Token을 직접 입력한 경우 Google People API 호출
+  if (accessToken.trim()) {
+    try {
+      const url =
+        'https://people.googleapis.com/v1/people/me/connections?personFields=names,emailAddresses,organizations,phoneNumbers,memberships&pageSize=200';
+      const response = await fetch(url, {
+        headers: {
+          Authorization: `Bearer ${accessToken.trim()}`,
+        },
+      });
+      if (!response.ok) {
+        const errText = await response.text();
+        res.status(response.status).json({
+          error: `Google People API 호출 실패 (${response.status}): ${errText}`,
+        });
+        return;
+      }
+      const data = (await response.json()) as {
+        connections?: Array<{
+          names?: Array<{ displayName?: string }>;
+          emailAddresses?: Array<{ value?: string }>;
+          organizations?: Array<{ name?: string; title?: string }>;
+          phoneNumbers?: Array<{ value?: string }>;
+        }>;
+      };
+      const contacts: GoogleContactNormalized[] = [];
+      for (const person of data.connections || []) {
+        const email = person.emailAddresses?.[0]?.value?.trim() || '';
+        if (!email) continue;
+        contacts.push({
+          이메일: email,
+          수신자명: person.names?.[0]?.displayName || email.split('@')[0],
+          회사명: person.organizations?.[0]?.name || '',
+          직급: person.organizations?.[0]?.title || '',
+          전화번호: person.phoneNumbers?.[0]?.value || '',
+          라벨: 'Gmail 주소록 (People API)',
+        });
+      }
+      res.json({
+        ok: true,
+        source: 'GOOGLE_PEOPLE_API',
+        contacts,
+      });
+      return;
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'Google People API 연동 중 오류 발생',
+      });
+      return;
+    }
+  }
+
+  // 2) 연결된 Google Contacts 커넥터(gsk) 호출 시도
+  try {
+    const argsJson = JSON.stringify({
+      query: query.trim() || '@',
+      limit: 100,
+    });
+    const { stdout } = await execFileAsync('gsk', [
+      'connector',
+      'call',
+      'google_contacts',
+      '-t',
+      'search',
+      '-a',
+      argsJson,
+    ]);
+    const envelope = JSON.parse(stdout);
+    const rawItems: Array<Record<string, unknown>> =
+      envelope?.data?.result?.contacts ||
+      envelope?.data?.contacts ||
+      envelope?.data?.result?.results ||
+      envelope?.data?.results ||
+      (Array.isArray(envelope?.data?.result) ? envelope.data.result : []);
+
+    const contacts: GoogleContactNormalized[] = [];
+    for (const item of rawItems) {
+      const email =
+        String(
+          item.email ||
+            (Array.isArray(item.emails) && (item.emails[0] as { value?: string })?.value) ||
+            (Array.isArray(item.emailAddresses) &&
+              (item.emailAddresses[0] as { value?: string })?.value) ||
+            ''
+        ).trim();
+      if (!email) continue;
+      contacts.push({
+        이메일: email,
+        수신자명: String(item.name || item.displayName || email.split('@')[0]),
+        회사명: String(item.company || item.organization || ''),
+        직급: String(item.title || item.jobTitle || ''),
+        전화번호: String(item.phone || item.phoneNumber || ''),
+        라벨: 'Gmail 연결 계정 주소록',
+      });
+    }
+
+    res.json({
+      ok: true,
+      source: 'GSK_GOOGLE_CONTACTS_CONNECTOR',
+      contacts,
+      rawCount: rawItems.length,
+    });
+  } catch (err) {
+    res.status(200).json({
+      ok: true,
+      source: 'CONNECTOR_EMPTY_OR_FALLBACK',
+      contacts: [],
+      note: err instanceof Error ? err.message : 'Google Contacts 커넥터 응답 없음',
+    });
+  }
 });
 
 // 프로덕션 정적 파일 서빙 (빌드된 dist 디렉토리가 있을 경우)

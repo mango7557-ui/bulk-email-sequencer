@@ -13,6 +13,7 @@ import {
   ShieldAlert,
   ArrowRight,
   Table,
+  Users,
 } from 'lucide-react';
 import {
   ColumnMapping,
@@ -22,6 +23,7 @@ import {
   ValidatedRecipient,
 } from '../types';
 import { downloadSampleExcelFile } from '../utils/excelHelper';
+import { GmailContactsModal } from './GmailContactsModal';
 
 interface Step1Props {
   fileName: string;
@@ -32,6 +34,7 @@ interface Step1Props {
   optOutList: OptOutEntry[];
   onFileSelected: (file: File) => void;
   onLoadSampleData: () => void;
+  onImportGmailContacts: (rows: RawRow[], mode: 'merge' | 'replace', sourceLabel: string) => void;
   onUpdateMapping: (next: ColumnMapping) => void;
   onAddOptOut: (email: string, reason: string) => Promise<void>;
   onRemoveOptOut: (email: string) => Promise<void>;
@@ -47,6 +50,7 @@ export const Step1UploadMapping: React.FC<Step1Props> = ({
   optOutList,
   onFileSelected,
   onLoadSampleData,
+  onImportGmailContacts,
   onUpdateMapping,
   onAddOptOut,
   onRemoveOptOut,
@@ -60,6 +64,7 @@ export const Step1UploadMapping: React.FC<Step1Props> = ({
   const [newOptOutEmail, setNewOptOutEmail] = useState('');
   const [newOptOutReason, setNewOptOutReason] = useState('');
   const [showOptOutManager, setShowOptOutManager] = useState(false);
+  const [showGmailModal, setShowGmailModal] = useState(false);
 
   const validCount = validatedList.filter((r) => r.filterStatus === 'VALID').length;
   const syntaxErrCount = validatedList.filter((r) => r.filterStatus === 'INVALID_SYNTAX').length;
@@ -183,10 +188,18 @@ export const Step1UploadMapping: React.FC<Step1Props> = ({
           <div className="space-y-2.5">
             <button
               type="button"
-              onClick={onLoadSampleData}
-              className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium transition shadow-lg shadow-indigo-600/20"
+              onClick={() => setShowGmailModal(true)}
+              className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white text-sm font-semibold transition shadow-lg shadow-blue-600/25"
             >
-              <Sparkles className="w-4 h-4" />
+              <Users className="w-4 h-4" />
+              Gmail 주소록 (Google Contacts) 연동
+            </button>
+            <button
+              type="button"
+              onClick={onLoadSampleData}
+              className="w-full flex items-center justify-center gap-2 px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-indigo-300 border border-indigo-500/30 text-xs font-medium transition"
+            >
+              <Sparkles className="w-3.5 h-3.5" />
               샘플 엑셀 데이터(15건) 즉시 로드
             </button>
             <div className="grid grid-cols-2 gap-2">
@@ -210,6 +223,13 @@ export const Step1UploadMapping: React.FC<Step1Props> = ({
           </div>
         </div>
       </div>
+
+      {/* Gmail 주소록(Google Contacts) 연동 모달 */}
+      <GmailContactsModal
+        isOpen={showGmailModal}
+        onClose={() => setShowGmailModal(false)}
+        onImportContacts={onImportGmailContacts}
+      />
 
       {/* 수신거부(Opt-Out) DB 관리 패널 */}
       {showOptOutManager && (

@@ -222,6 +222,51 @@ export const App: React.FC = () => {
     showToast('샘플 수신자 데이터 15건이 로드되었습니다.');
   };
 
+  // Gmail 주소록(Google Contacts) 연동 데이터 반영 (병합 또는 전체 교체)
+  const handleImportGmailContacts = (
+    importedRows: RawRow[],
+    mode: 'merge' | 'replace',
+    sourceLabel: string
+  ) => {
+    if (importedRows.length === 0) return;
+
+    if (mode === 'replace' || rawRows.length === 0) {
+      const hdrs = Object.keys(importedRows[0]);
+      setFileName(sourceLabel);
+      setHeaders(hdrs);
+      setRawRows(importedRows);
+      setMapping(autoDetectColumnMapping(hdrs));
+      showToast(`${sourceLabel}로 발송 목록이 교체되었습니다.`);
+      return;
+    }
+
+    // 기존 행과 병합 (헤더 합집합 구성)
+    const combinedHeaders = Array.from(
+      new Set([...headers, ...Object.keys(importedRows[0])])
+    );
+    const normalizedExisting = rawRows.map((r) => {
+      const copy: RawRow = {};
+      combinedHeaders.forEach((h) => {
+        copy[h] = r[h] ?? '';
+      });
+      return copy;
+    });
+    const normalizedImported = importedRows.map((r) => {
+      const copy: RawRow = {};
+      combinedHeaders.forEach((h) => {
+        copy[h] = r[h] ?? '';
+      });
+      return copy;
+    });
+
+    const merged = [...normalizedExisting, ...normalizedImported];
+    setFileName(`${fileName} + ${sourceLabel}`);
+    setHeaders(combinedHeaders);
+    setRawRows(merged);
+    setMapping(autoDetectColumnMapping(combinedHeaders));
+    showToast(`${sourceLabel}이(가) 기존 수신자 목록에 병합되었습니다. (총 ${merged.length}행)`);
+  };
+
   // 수신거부 DB 추가/삭제
   const handleAddOptOut = async (email: string, reason: string) => {
     if (!useClientFallback) {
@@ -622,6 +667,7 @@ export const App: React.FC = () => {
             optOutList={optOutList}
             onFileSelected={handleFileSelected}
             onLoadSampleData={handleLoadSampleData}
+            onImportGmailContacts={handleImportGmailContacts}
             onUpdateMapping={setMapping}
             onAddOptOut={handleAddOptOut}
             onRemoveOptOut={handleRemoveOptOut}
