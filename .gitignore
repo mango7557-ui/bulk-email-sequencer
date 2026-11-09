@@ -5,3 +5,5 @@ node_modules/
 .firebase/
 .firebaserc
 *.log
+server/data/
+.test-data/

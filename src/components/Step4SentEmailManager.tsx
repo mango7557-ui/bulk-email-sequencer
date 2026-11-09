@@ -200,7 +200,7 @@ export const Step4SentEmailManager: React.FC<Step4SentEmailManagerProps> = ({
           </div>
           <div className="text-2xl font-bold text-emerald-300">{sentCount}건</div>
           <div className="text-[11px] text-emerald-400/80 mt-1">
-            도달 성공률 {deliveryRate}%
+            접수/시뮬레이션 처리율 {deliveryRate}% (도달률 아님)
           </div>
         </button>
 
@@ -436,6 +436,7 @@ export const Step4SentEmailManager: React.FC<Step4SentEmailManagerProps> = ({
                           >
                             {rec.status}
                           </span>
+                          <div className="text-[11px] text-amber-300">{rec.provider === 'dryrun' ? '모의 발송 · 실제 전송 안 됨' : `${rec.provider} 접수 결과`}</div>
                         </td>
                         <td className="py-3 px-3 font-mono text-slate-400 whitespace-nowrap">
                           {new Date(rec.sentAt).toLocaleString('ko-KR')}
@@ -565,13 +566,7 @@ export const Step4SentEmailManager: React.FC<Step4SentEmailManagerProps> = ({
               )}
 
               <div className="rounded-xl bg-white text-slate-900 p-5 border border-slate-300 leading-relaxed text-sm">
-                <div
-                  dangerouslySetInnerHTML={{
-                    __html:
-                      detailRecord.bodyHtml ||
-                      '<p>본문 미리보기 데이터가 없습니다.</p>',
-                  }}
-                />
+                <iframe title="발송 본문" sandbox="" className="w-full h-80" srcDoc={detailRecord.bodyHtml || '<p>본문 없음</p>'} />
               </div>
             </div>
 

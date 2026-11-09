@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Mail,
   FileSpreadsheet,
@@ -89,6 +89,7 @@ export const App: React.FC = () => {
     loadClientSentHistory()
   );
   const [useClientFallback, setUseClientFallback] = useState<boolean>(false);
+  const serverWasConnected = useRef(false);
 
   // Step 2 상태: 이메일 템플릿 & 법적 컴플라이언스
   const [campaignTitle, setCampaignTitle] = useState<string>(
@@ -149,11 +150,13 @@ export const App: React.FC = () => {
       if (res.ok && contentType.includes('application/json')) {
         const data = await res.json();
         setOptOutList(data.optOutList || []);
+        serverWasConnected.current = true;
         setUseClientFallback(false);
         return;
       }
       throw new Error('Static hosting mode');
     } catch {
+      if (serverWasConnected.current) return;
       setUseClientFallback(true);
       setOptOutList(loadClientOptOutList());
     }
@@ -167,11 +170,13 @@ export const App: React.FC = () => {
       if (res.ok && contentType.includes('application/json')) {
         const data: CampaignStatusResponse = await res.json();
         setCampaignStatus(data);
+        serverWasConnected.current = true;
         setUseClientFallback(false);
         return;
       }
       throw new Error('Static hosting mode');
     } catch {
+      if (serverWasConnected.current) return;
       setUseClientFallback(true);
       setCampaignStatus(clientQueueEngine.getStatus());
     }
@@ -490,6 +495,10 @@ export const App: React.FC = () => {
 
   // 캠페인 제어 액션
   const handleStartCampaign = async () => {
+    if (useClientFallback && providerConfig.provider !== 'dryrun') {
+      showToast('실제 발송 서버가 없습니다. GitHub Pages에서는 시뮬레이션만 가능합니다. 로컬 통합 서버에 접속하세요.');
+      return;
+    }
     const payload = {
       title: campaignTitle,
       subjectTemplate,
@@ -526,8 +535,11 @@ export const App: React.FC = () => {
           return;
         }
       } catch {
-        // fallback below
+        showToast('서버 응답을 받지 못했습니다. 시작 여부를 확인한 후 다시 시도하세요.');
+        return;
       }
+      showToast('발송 API가 연결되지 않았습니다. 시뮬레이션으로 자동 전환하지 않습니다.');
+      return;
     }
 
     clientQueueEngine.start(payload);
@@ -536,75 +548,35 @@ export const App: React.FC = () => {
   };
 
   const handlePauseCampaign = async () => {
+    await controlCampaign('pause');
+  };
+
+  const controlCampaign = async (action: 'pause' | 'resume' | 'cancel' | 'reset') => {
     if (!useClientFallback) {
       try {
-        const res = await fetch('/api/campaign/pause', { method: 'POST' });
-        if (res.ok) {
-          showToast('발송 큐가 일시 정지되었습니다.');
-          fetchCampaignStatus();
-          return;
-        }
-      } catch {
-        // fallback below
-      }
+        const res = await fetch(`/api/campaign/${action}`, { method: 'POST' });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || '발송 제어 실패');
+        await fetchCampaignStatus();
+        showToast(`발송 큐 ${action} 처리 완료`);
+      } catch (error) { showToast((error as Error).message); }
+      return;
     }
-    clientQueueEngine.pause();
+    clientQueueEngine[action]();
     setCampaignStatus(clientQueueEngine.getStatus());
-    showToast('발송 큐가 일시 정지되었습니다.');
+    showToast(`시뮬레이션 큐 ${action} 처리 완료`);
   };
 
   const handleResumeCampaign = async () => {
-    if (!useClientFallback) {
-      try {
-        const res = await fetch('/api/campaign/resume', { method: 'POST' });
-        if (res.ok) {
-          showToast('발송 큐를 재개합니다.');
-          fetchCampaignStatus();
-          return;
-        }
-      } catch {
-        // fallback below
-      }
-    }
-    clientQueueEngine.resume();
-    setCampaignStatus(clientQueueEngine.getStatus());
-    showToast('발송 큐를 재개합니다.');
+    return controlCampaign('resume');
   };
 
   const handleCancelCampaign = async () => {
-    if (!useClientFallback) {
-      try {
-        const res = await fetch('/api/campaign/cancel', { method: 'POST' });
-        if (res.ok) {
-          showToast('발송 큐가 취소되었습니다.');
-          fetchCampaignStatus();
-          return;
-        }
-      } catch {
-        // fallback below
-      }
-    }
-    clientQueueEngine.cancel();
-    setCampaignStatus(clientQueueEngine.getStatus());
-    showToast('발송 큐가 취소되었습니다.');
+    return controlCampaign('cancel');
   };
 
   const handleResetCampaign = async () => {
-    if (!useClientFallback) {
-      try {
-        const res = await fetch('/api/campaign/reset', { method: 'POST' });
-        if (res.ok) {
-          showToast('캠페인 상태가 초기화되었습니다.');
-          fetchCampaignStatus();
-          return;
-        }
-      } catch {
-        // fallback below
-      }
-    }
-    clientQueueEngine.reset();
-    setCampaignStatus(clientQueueEngine.getStatus());
-    showToast('캠페인 상태가 초기화되었습니다.');
+    return controlCampaign('reset');
   };
 
   const handleSimulateOneClickUnsubscribe = async (email: string) => {
@@ -842,6 +814,10 @@ export const App: React.FC = () => {
 
       {/* 메인 워크스페이스 영역 */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 py-6">
+        <div role="status" className="mb-4 rounded-xl border border-amber-500/40 bg-amber-500/10 p-4 text-sm text-amber-200">
+          {useClientFallback ? '발송 서버 미연결 — 이 페이지는 시뮬레이션 전용입니다. 실제 이메일은 전송되지 않습니다.' : '로컬 발송 서버 연결 — SMTP 또는 Resend 인증 설정 후 실제 발송할 수 있습니다.'}
+          {' '}SENT는 제공업체의 접수 결과이며 수신함 도착을 보장하지 않습니다. Dry-Run 기록은 실제 발송이 아닙니다.
+        </div>
         {activeStep === 1 && (
           <Step1UploadMapping
             fileName={fileName}

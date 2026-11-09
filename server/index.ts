@@ -6,11 +6,14 @@ import { fileURLToPath } from 'url';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import nodemailer from 'nodemailer';
+import { randomUUID } from 'node:crypto';
 
 const execFileAsync = promisify(execFile);
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const dataDir = process.env.DATA_DIR || path.join(__dirname, 'data');
+fs.mkdirSync(dataDir, { recursive: true });
 
 const app = express();
 const PORT = process.env.PORT ? Number(process.env.PORT) : 4000;
@@ -30,7 +33,7 @@ export interface OptOutEntry {
   noticeSentAt: string; // 정보통신망법 제50조: 14일 이내 처리결과 통지 이력
 }
 
-const OPTOUT_DB_PATH = path.join(__dirname, 'optout-db.json');
+const OPTOUT_DB_PATH = path.join(dataDir, 'optout-db.json');
 
 const INITIAL_OPTOUT_LIST: OptOutEntry[] = [
   {
@@ -101,7 +104,7 @@ export interface SentEmailRecord {
   headersIncluded?: Record<string, string>;
 }
 
-const SENT_HISTORY_DB_PATH = path.join(__dirname, 'sent-history-db.json');
+const SENT_HISTORY_DB_PATH = path.join(dataDir, 'sent-history-db.json');
 
 function loadSentHistoryDb(): SentEmailRecord[] {
   try {
@@ -256,6 +259,61 @@ let campaign: ActiveCampaign = {
 
 let workerTimer: NodeJS.Timeout | null = null;
 let batchRestInterval: NodeJS.Timeout | null = null;
+let inFlight = false;
+let preparing = false;
+let nextAllowedAt = 0;
+const campaignPath = path.join(dataDir, 'campaign.json');
+function persistCampaign() {
+  // Credentials are never written to the queue snapshot.
+  const providerConfig = { ...campaign.providerConfig, smtpPass: undefined, resendApiKey: undefined };
+  const temp = `${campaignPath}.tmp`;
+  fs.writeFileSync(temp, JSON.stringify({ ...campaign, providerConfig, nextAllowedAt }));
+  fs.renameSync(temp, campaignPath);
+}
+if (fs.existsSync(campaignPath)) {
+  campaign = JSON.parse(fs.readFileSync(campaignPath, 'utf8'));
+  nextAllowedAt = (campaign as ActiveCampaign & { nextAllowedAt?: number }).nextAllowedAt || 0;
+  for (const task of campaign.tasks) {
+    if (task.status === 'SENDING') {
+      task.status = 'FAILED';
+      task.statusCode = 'DELIVERY_UNKNOWN_AFTER_RESTART';
+      task.errorMessage = '전송 중 서버가 종료되어 접수 여부가 불확실합니다. 제공업체에서 확인 후 재발송하세요.';
+      campaign.currentIndex += 1;
+    }
+  }
+  if (['RUNNING', 'BATCH_RESTING', 'PAUSED'].includes(campaign.state)) campaign.state = 'PAUSED';
+  persistCampaign();
+}
+
+function providerWithCredentials(config: ProviderConfig): ProviderConfig {
+  return {
+    ...config,
+    smtpHost: config.smtpHost || process.env.SMTP_HOST,
+    smtpUser: config.smtpUser || process.env.SMTP_USER,
+    smtpPass: config.smtpPass || process.env.SMTP_PASS,
+    resendApiKey: config.resendApiKey || process.env.RESEND_API_KEY,
+  };
+}
+function smtpTransport(config: ProviderConfig) {
+  return nodemailer.createTransport({
+    host: config.smtpHost, port: Number(config.smtpPort || 587),
+    secure: Boolean(config.smtpSecure),
+    requireTLS: !config.smtpSecure,
+    connectionTimeout: 15000, greetingTimeout: 15000, socketTimeout: 30000,
+    auth: { user: config.smtpUser!, pass: config.smtpPass! },
+    // Only the local integration-test process may use an unencrypted mock server.
+    ...(process.env.NODE_ENV === 'test' && config.smtpHost === '127.0.0.1' ? { requireTLS: false, ignoreTLS: true } : {}),
+  });
+}
+async function verifyProvider(config: ProviderConfig) {
+  if (config.provider === 'smtp') {
+    if (!config.smtpHost || !config.smtpUser || !config.smtpPass) throw new Error('SMTP 계정과 앱 비밀번호를 설정하세요.');
+    const transport = smtpTransport(config);
+    try { await transport.verify(); } finally { transport.close(); }
+  } else if (config.provider === 'resend' && !config.resendApiKey) {
+    throw new Error('Resend API 키를 설정하세요.');
+  }
+}
 
 function addLog(
   level: CampaignEventLog['level'],
@@ -273,6 +331,7 @@ function addLog(
   if (campaign.logs.length > 500) {
     campaign.logs.length = 500;
   }
+  persistCampaign();
 }
 
 function clearTimers() {
@@ -425,7 +484,7 @@ async function dispatchSingleEmail(
     return {
       ok: true,
       status: 'SENT',
-      code: '250 2.0.0 OK (RFC8058 One-Click Signed)',
+      code: 'SIMULATED_NOT_SENT',
       messageId: `<sim-${Date.now()}-${task.rowIndex}@${compliance.senderEmail.split('@')[1] || 'mailflow.local'}>`,
     };
   }
@@ -444,9 +503,11 @@ async function dispatchSingleEmail(
     try {
       const response = await fetch('https://api.resend.com/emails', {
         method: 'POST',
+        signal: AbortSignal.timeout(30000),
         headers: {
           Authorization: `Bearer ${providerCfg.resendApiKey}`,
           'Content-Type': 'application/json',
+          'Idempotency-Key': task.id,
         },
         body: JSON.stringify({
           from: `${compliance.senderName} <${compliance.senderEmail}>`,
@@ -461,10 +522,9 @@ async function dispatchSingleEmail(
 
       const data = (await response.json()) as { id?: string; message?: string; name?: string };
       if (!response.ok) {
-        const isBounce = response.status === 422;
         return {
           ok: false,
-          status: isBounce ? 'BOUNCED' : 'FAILED',
+          status: 'FAILED',
           code: `RESEND_${response.status}_${data.name || 'ERR'}`,
           error: data.message || `Resend API 오류 (${response.status})`,
         };
@@ -480,7 +540,7 @@ async function dispatchSingleEmail(
       return {
         ok: false,
         status: 'FAILED',
-        code: 'NETWORK_ERROR',
+        code: 'DELIVERY_UNKNOWN_NETWORK_ERROR',
         error: err instanceof Error ? err.message : 'Resend API 호출 실패',
       };
     }
@@ -498,15 +558,7 @@ async function dispatchSingleEmail(
     }
 
     try {
-      const transporter = nodemailer.createTransport({
-        host: providerCfg.smtpHost,
-        port: Number(providerCfg.smtpPort || 587),
-        secure: Boolean(providerCfg.smtpSecure),
-        auth: {
-          user: providerCfg.smtpUser,
-          pass: providerCfg.smtpPass,
-        },
-      });
+      const transporter = smtpTransport(providerCfg);
 
       const info = await transporter.sendMail({
         from: `"${compliance.senderName}" <${compliance.senderEmail}>`,
@@ -516,21 +568,25 @@ async function dispatchSingleEmail(
         html: htmlBody,
         text: textBody || undefined,
         headers,
+        messageId: `<${task.id}@${compliance.senderEmail.split('@')[1]}>`,
       });
+
+      if (!info.accepted?.length) return { ok: false, status: 'FAILED', code: 'SMTP_NOT_ACCEPTED', error: 'SMTP 서버가 수신자를 접수하지 않았습니다.' };
 
       return {
         ok: true,
         status: 'SENT',
-        code: '250 SMTP_SENT',
+        code: '250 SMTP_ACCEPTED',
         messageId: info.messageId,
       };
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'SMTP 발송 오류';
-      const isBounce = /550|554|bounce|unknown user/i.test(msg);
+      const smtpError = err as { responseCode?: number; code?: string };
+      const isBounce = smtpError.responseCode === 550;
       return {
         ok: false,
         status: isBounce ? 'BOUNCED' : 'FAILED',
-        code: isBounce ? '550_SMTP_BOUNCE' : 'SMTP_SEND_ERROR',
+        code: smtpError.responseCode ? `SMTP_${smtpError.responseCode}` : `DELIVERY_UNKNOWN_${smtpError.code || 'SMTP_ERROR'}`,
         error: msg,
       };
     }
@@ -555,7 +611,12 @@ function computeRandomDelayMs(minSec: number, maxSec: number): number {
 }
 
 async function processNextInQueue() {
-  if (campaign.state !== 'RUNNING') return;
+  if (campaign.state !== 'RUNNING' || inFlight) return;
+  if (nextAllowedAt > Date.now()) {
+    clearTimers();
+    workerTimer = setTimeout(() => { void processNextInQueue(); }, nextAllowedAt - Date.now());
+    return;
+  }
 
   if (campaign.currentIndex >= campaign.tasks.length) {
     campaign.state = 'COMPLETED';
@@ -574,6 +635,7 @@ async function processNextInQueue() {
   if (batchSize > 0 && campaign.sentInCurrentBatch >= batchSize) {
     campaign.state = 'BATCH_RESTING';
     campaign.batchRestRemainingSec = Math.max(1, Math.round(batchRestSec));
+    nextAllowedAt = Date.now() + campaign.batchRestRemainingSec * 1000;
     campaign.sentInCurrentBatch = 0;
     campaign.currentBatchNumber += 1;
 
@@ -591,7 +653,7 @@ async function processNextInQueue() {
         if (batchRestInterval) clearInterval(batchRestInterval);
         return;
       }
-      campaign.batchRestRemainingSec -= 1;
+      campaign.batchRestRemainingSec = Math.max(0, Math.ceil((nextAllowedAt - Date.now()) / 1000));
       if (campaign.batchRestRemainingSec <= 0) {
         if (batchRestInterval) clearInterval(batchRestInterval);
         batchRestInterval = null;
@@ -608,17 +670,20 @@ async function processNextInQueue() {
   }
 
   const task = campaign.tasks[campaign.currentIndex];
+  inFlight = true;
   task.status = 'SENDING';
   task.attempts += 1;
   task.batchNumber = campaign.currentBatchNumber;
 
   const subject = buildCompliantSubject(campaign.subjectTemplate, task, campaign.compliance);
   const htmlBody = buildCompliantHtmlBody(campaign.bodyHtmlTemplate, task, campaign.compliance, campaign.id);
-  const textBody = interpolateTemplate(campaign.bodyTextTemplate || '', task);
+  const textBody = interpolateTemplate(campaign.bodyTextTemplate || '', task) +
+    `\n\n${campaign.compliance.senderName} | ${campaign.compliance.senderEmail}\n${campaign.compliance.senderPhone} | ${campaign.compliance.senderAddress}\n수신거부: ${buildUnsubscribeUrl(campaign.compliance.unsubscribeBaseUrl, task.email, campaign.id)}`;
   const headers = buildRfc8058Headers(task.email, campaign.compliance, campaign.id);
 
   task.renderedSubject = subject;
   task.headersIncluded = headers;
+  persistCampaign();
 
   const result = await dispatchSingleEmail(
     task,
@@ -628,12 +693,16 @@ async function processNextInQueue() {
     headers,
     campaign.compliance,
     campaign.providerConfig
-  );
+  ).catch((error: Error) => ({ ok: false, status: 'FAILED' as RecipientStatus, code: 'DELIVERY_UNKNOWN', error: error.message, messageId: undefined }));
+  inFlight = false;
 
-  // 발송 도중 일시정지나 취소된 경우 확인
-  const currentState = campaign.state as CampaignState;
-  if (currentState === 'CANCELLED') {
-    task.status = 'CANCELLED';
+  // Retry only explicit temporary rejection. A timeout may already have delivered the message.
+  if (/^SMTP_4\d\d$|^RESEND_429_/.test(result.code) && task.attempts < 3 && (campaign.state as CampaignState) !== 'CANCELLED') {
+    task.status = 'QUEUED';
+    task.statusCode = result.code;
+    nextAllowedAt = Date.now() + Math.max(1000, campaign.rateLimit.minDelaySec * 1000) * 2 ** (task.attempts - 1);
+    addLog('WARN', `${task.email}: 일시 거절로 재시도 대기 (${task.attempts}/3)`, { code: result.code });
+    if ((campaign.state as CampaignState) === 'RUNNING') void processNextInQueue();
     return;
   }
 
@@ -651,6 +720,7 @@ async function processNextInQueue() {
   const delayMs = isLastItem ? 0 : computeRandomDelayMs(minDelaySec, maxDelaySec);
   task.delayAppliedMs = delayMs;
   campaign.nextSendDelayMs = delayMs;
+  nextAllowedAt = Date.now() + delayMs;
 
   // 보낸 이메일 보관함에 영구 기록
   sentHistoryList.unshift({
@@ -702,7 +772,8 @@ async function processNextInQueue() {
     );
   }
 
-  if (campaign.state !== 'RUNNING') return;
+  persistCampaign();
+  if ((campaign.state as CampaignState) !== 'RUNNING') return;
 
   if (isLastItem) {
     processNextInQueue();
@@ -885,9 +956,9 @@ app.get('/api/campaign/status', (_req, res) => {
 });
 
 // 새 캠페인 순차 발송 시작
-app.post('/api/campaign/start', (req, res) => {
-  if (campaign.state === 'RUNNING' || campaign.state === 'BATCH_RESTING') {
-    res.status(400).json({ error: '이미 실행 중인 캠페인이 있습니다. 먼저 일시정지 또는 취소해 주세요.' });
+app.post('/api/campaign/start', async (req, res) => {
+  if (preparing || inFlight || ['RUNNING', 'BATCH_RESTING', 'PAUSED'].includes(campaign.state)) {
+    res.status(409).json({ error: '활성 캠페인이 있습니다. 취소 후 진행 중인 전송이 끝나면 새 캠페인을 시작하세요.' });
     return;
   }
 
@@ -900,7 +971,7 @@ app.post('/api/campaign/start', (req, res) => {
     rateLimit,
     providerConfig,
     recipients,
-  } = req.body as {
+  } = (req.body || {}) as {
     title?: string;
     subjectTemplate: string;
     bodyHtmlTemplate: string;
@@ -922,11 +993,47 @@ app.post('/api/campaign/start', (req, res) => {
     return;
   }
 
-  clearTimers();
+  const emailValid = (value: unknown): value is string => typeof value === 'string' && /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(value);
+  if (recipients.length > 10000 || !compliance || !emailValid(compliance.senderEmail) ||
+      !compliance.senderName || /[\r\n]/.test(compliance.senderName) ||
+      typeof subjectTemplate !== 'string' || !subjectTemplate.trim() || /[\r\n]/.test(subjectTemplate) ||
+      typeof bodyHtmlTemplate !== 'string' || !bodyHtmlTemplate.trim() ||
+      !providerConfig || !['dryrun', 'smtp', 'resend'].includes(providerConfig.provider) ||
+      !rateLimit || !Object.values(rateLimit).every(v => typeof v === 'number' && Number.isFinite(v)) ||
+      !(rateLimit.minDelaySec >= 0.2 && rateLimit.maxDelaySec >= rateLimit.minDelaySec && rateLimit.maxDelaySec <= 3600) ||
+      !Number.isInteger(rateLimit.batchSize) || rateLimit.batchSize < 1 || rateLimit.batchRestSec < 0 || rateLimit.batchRestSec > 86400) {
+    res.status(400).json({ error: '발신자·제목·본문·발송 간격 설정을 확인하세요. 수신자는 최대 10,000명입니다.' });
+    return;
+  }
+  if (providerConfig.provider !== 'dryrun' && compliance.isAd) {
+    let publicHttps = false;
+    try { const url = new URL(compliance.unsubscribeBaseUrl); publicHttps = url.protocol === 'https:' && !['localhost', '127.0.0.1'].includes(url.hostname); } catch { /* invalid URL */ }
+    if (!publicHttps || !compliance.senderPhone?.trim() || !compliance.senderAddress?.trim() || !compliance.includeRfc8058Headers) {
+      res.status(400).json({ error: '광고 메일에는 공개 HTTPS 수신거부 URL과 전송자 전화번호·주소, 수신거부 헤더가 필요합니다.' });
+      return;
+    }
+  }
+  const seen = new Set<string>();
+  const eligible = recipients.filter(r => {
+    if (!r || !emailValid(r.email?.trim())) return false;
+    const email = r.email.trim().toLowerCase();
+    if (seen.has(email) || optOutList.some(o => o.email.toLowerCase() === email)) return false;
+    seen.add(email);
+    return true;
+  });
+  if (!eligible.length) { res.status(400).json({ error: '서버 검증을 통과한 수신자가 없습니다.' }); return; }
+  const resolvedProvider = providerWithCredentials(providerConfig);
+  preparing = true;
+  try { await verifyProvider(resolvedProvider); }
+  catch (error) { res.status(400).json({ error: `발송 연결 실패: ${(error as Error).message}` }); preparing = false; return; }
+  preparing = false;
 
-  const campaignId = `cmp-${Date.now().toString(36)}`;
-  const tasks: RecipientTask[] = recipients.map((r, idx) => ({
-    id: `${campaignId}-row-${r.rowIndex ?? idx + 1}`,
+  clearTimers();
+  nextAllowedAt = 0;
+
+  const campaignId = `cmp-${randomUUID()}`;
+  const tasks: RecipientTask[] = eligible.map((r, idx) => ({
+    id: `${campaignId}-row-${idx + 1}`,
     rowIndex: r.rowIndex ?? idx + 1,
     email: r.email.trim(),
     name: r.name?.trim() || '',
@@ -946,7 +1053,7 @@ app.post('/api/campaign/start', (req, res) => {
     bodyTextTemplate: bodyTextTemplate || '',
     compliance,
     rateLimit,
-    providerConfig,
+    providerConfig: resolvedProvider,
     tasks,
     currentIndex: 0,
     sentInCurrentBatch: 0,
@@ -966,7 +1073,7 @@ app.post('/api/campaign/start', (req, res) => {
   );
 
   processNextInQueue();
-  res.json({ ok: true, campaignId: campaign.id });
+  res.json({ ok: true, campaignId: campaign.id, queued: tasks.length, excluded: recipients.length - tasks.length });
 });
 
 // 일시 정지 (Pause)
@@ -986,11 +1093,19 @@ app.post('/api/campaign/pause', (_req, res) => {
 });
 
 // 재개 (Resume)
-app.post('/api/campaign/resume', (_req, res) => {
+app.post('/api/campaign/resume', async (_req, res) => {
+  if (preparing) { res.status(409).json({ error: '연결 확인 중입니다.' }); return; }
   if (campaign.state !== 'PAUSED') {
     res.status(400).json({ error: '일시 정지 상태인 캠페인만 재개할 수 있습니다.' });
     return;
   }
+  preparing = true;
+  try {
+    campaign.providerConfig = providerWithCredentials(campaign.providerConfig);
+    await verifyProvider(campaign.providerConfig);
+  } catch (error) { res.status(400).json({ error: (error as Error).message }); preparing = false; return; }
+  preparing = false;
+  if (campaign.state !== 'PAUSED') { res.status(409).json({ error: '캠페인 상태가 변경되었습니다.' }); return; }
   campaign.state = 'RUNNING';
   addLog('INFO', `발송 큐가 재개(RESUMED)되었습니다. (${campaign.currentIndex + 1}번째 항목부터 순차 발송 계속)`, {
     status: 'SYSTEM',
@@ -1013,7 +1128,7 @@ app.post('/api/campaign/cancel', (_req, res) => {
 
   let cancelledCount = 0;
   for (let i = campaign.currentIndex; i < campaign.tasks.length; i++) {
-    if (campaign.tasks[i].status === 'QUEUED' || campaign.tasks[i].status === 'SENDING') {
+    if (campaign.tasks[i].status === 'QUEUED') {
       campaign.tasks[i].status = 'CANCELLED';
       campaign.tasks[i].statusCode = 'USER_CANCELLED';
       cancelledCount++;
@@ -1029,6 +1144,7 @@ app.post('/api/campaign/cancel', (_req, res) => {
 
 // 초기화 (Reset)
 app.post('/api/campaign/reset', (_req, res) => {
+  if (inFlight || preparing) { res.status(409).json({ error: '전송 중인 1건의 결과를 기다린 후 초기화하세요.' }); return; }
   clearTimers();
   campaign.state = 'IDLE';
   campaign.tasks = [];
@@ -1037,6 +1153,10 @@ app.post('/api/campaign/reset', (_req, res) => {
   campaign.sentInCurrentBatch = 0;
   campaign.currentBatchNumber = 1;
   campaign.batchRestRemainingSec = 0;
+  campaign.nextSendDelayMs = 0;
+  campaign.id = 'none';
+  nextAllowedAt = 0;
+  persistCampaign();
   res.json({ ok: true });
 });
 
@@ -1192,6 +1312,8 @@ app.post('/api/google-contacts/fetch', async (req, res) => {
   }
 });
 
+app.get('/api/health', (_req, res) => res.json({ service: 'mailflow', realSending: true }));
+
 // 프로덕션 정적 파일 서빙 (빌드된 dist 디렉토리가 있을 경우)
 const distPath = path.join(__dirname, '..', 'dist');
 if (fs.existsSync(distPath)) {
@@ -1205,6 +1327,6 @@ if (fs.existsSync(distPath)) {
   });
 }
 
-app.listen(PORT, () => {
+app.listen(PORT, process.env.HOST || '127.0.0.1', () => {
   console.log(`[MailFlow Pro Server] Running at http://localhost:${PORT}`);
 });

@@ -136,6 +136,7 @@ class ClientQueueEngine {
   private batchRestRemainingSec = 0;
   private nextSendDelayMs = 0;
   private logs: CampaignEventLog[] = [];
+  private generation = 0;
 
   private workerTimer: ReturnType<typeof setTimeout> | null = null;
   private batchInterval: ReturnType<typeof setInterval> | null = null;
@@ -277,6 +278,8 @@ class ClientQueueEngine {
       variables: Record<string, string>;
     }>;
   }) {
+    if (params.providerConfig.provider !== 'dryrun') throw new Error('브라우저 큐는 시뮬레이션 전용입니다.');
+    if (['RUNNING', 'PAUSED', 'BATCH_RESTING'].includes(this.state)) throw new Error('이미 활성 캠페인이 있습니다.');
     this.clearTimers();
     const campaignId = `cmp-${Date.now().toString(36)}`;
     this.id = campaignId;
@@ -369,6 +372,7 @@ class ClientQueueEngine {
       return;
     }
 
+    const generation = this.generation;
     const task = this.tasks[this.currentIndex];
     task.status = 'SENDING';
     task.attempts += 1;
@@ -378,6 +382,7 @@ class ClientQueueEngine {
     this.notify();
 
     await new Promise((r) => setTimeout(r, 150));
+    if (generation !== this.generation || task !== this.tasks[this.currentIndex] || task.status !== 'SENDING') return;
 
     const currentState = this.state as CampaignState;
     if (currentState === 'CANCELLED' || currentState === 'PAUSED') return;
@@ -387,7 +392,7 @@ class ClientQueueEngine {
 
     let ok = true;
     let status: RecipientStatus = 'SENT';
-    let code = '250 2.0.0 OK (RFC8058 One-Click Signed)';
+    let code = 'SIMULATED_NOT_SENT';
     let error: string | undefined;
 
     if (isOptedOut) {
@@ -475,6 +480,7 @@ class ClientQueueEngine {
 
   pause() {
     if (this.state !== 'RUNNING' && this.state !== 'BATCH_RESTING') return;
+    this.generation++;
     this.clearTimers();
     this.state = 'PAUSED';
     this.nextSendDelayMs = 0;
@@ -520,6 +526,8 @@ class ClientQueueEngine {
   }
 
   reset() {
+    this.generation++;
+    this.id = `reset-${Date.now()}`;
     this.clearTimers();
     this.state = 'IDLE';
     this.tasks = [];
